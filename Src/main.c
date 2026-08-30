@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <stdio.h>
+#include <string.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -57,7 +59,7 @@ static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void ESP8266_Send_User_Post(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -98,7 +100,18 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  
+  // 1. Give the ESP8266 a moment to boot up
+  HAL_Delay(2000); 
 
+  // 2. Connect to your Wi-Fi network
+  char wifiCmd[] = "AT+CWJAP=\"Rafi\",\"rafirabi\"\r\n";
+  HAL_UART_Transmit(&huart1, (uint8_t*)wifiCmd, strlen(wifiCmd), 5000);
+  HAL_Delay(5000); // Wait for connection to establish
+
+  // 3. Fire the POST request to test backend communication
+  ESP8266_Send_User_Post();
+  
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -325,7 +338,40 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void ESP8266_Send_User_Post(void) {
+    char atCommand[256];
+    char httpRequest[512];
+    
+    // Configured to point to your local IPv4 address
+    const char *server_ip = "192.168.0.232"; 
+    const char *json_data = "{\"uid\": \"some uid\", \"name\": \"a name\"}";
+    int json_len = strlen(json_data);
 
+    // 1. Construct the raw HTTP POST request string
+    sprintf(httpRequest,
+            "POST /api/users HTTP/1.1\r\n"
+            "Host: %s:3000\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n"
+            "%s", server_ip, json_len, json_data);
+
+    int http_len = strlen(httpRequest);
+
+    // 2. Open TCP Connection to your backend
+    sprintf(atCommand, "AT+CIPSTART=\"TCP\",\"%s\",3000\r\n", server_ip);
+    HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
+    HAL_Delay(2000); // Give the ESP-01 time to establish the socket
+
+    // 3. Declare the length of the upcoming HTTP data
+    sprintf(atCommand, "AT+CIPSEND=%d\r\n", http_len);
+    HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
+    HAL_Delay(500); // Wait for the '>' prompt from the ESP8266
+
+    // 4. Send the actual HTTP POST payload
+    HAL_UART_Transmit(&huart1, (uint8_t*)httpRequest, http_len, 2000);
+    HAL_Delay(1000); // Wait for server response and connection closure
+}
 /* USER CODE END 4 */
 
 /**
@@ -342,7 +388,7 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
-#ifdef USE_FULL_ASSERT
+#ifdef  USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.

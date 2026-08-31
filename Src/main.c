@@ -20,10 +20,12 @@
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "mfrc522.h"
+#include "VL53L0X.h" 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,6 +53,8 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 uint8_t rfid_id[5];
 char uid_string[20];
+uint16_t user_distance = 9999;
+struct VL53L0X my_tof; // Sensor object required by your library
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -104,11 +108,36 @@ int main(void)
   
   HAL_Delay(2000); 
 
-  // Connect to Wi-Fi network[cite: 1]
+  // 1. Configure and Initialize the Laser Ranging Sensor
+  my_tof.io_2v8 = true;
+  my_tof.address = 0x52; // Standard 0x29 default address shifted left by 1 bit for HAL
+  my_tof.io_timeout = 500;
+  VL53L0X_init(&my_tof); 
+
+  // 2. Set system state to "OFF" using PC13 (Blue Pill PC13 is active-low, so SET = OFF)
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
+
+  // 3. Standby Loop: Trap the system here until a user is within 800 mm
+  while (1) {
+      // Pass the struct pointer to the single-shot read function
+      user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof); 
+      
+      // If someone is detected closer than 200mm (and reading didn't time out/error), wake up
+      if (user_distance > 0 && user_distance < 50) {
+          break; 
+      }
+      HAL_Delay(500); 
+  }
+
+  // 4. System Woke Up! Turn PC13 LED "ON" (RESET = ON)
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+
+  // 5. Connect to Wi-Fi now that the system is awake[cite: 1]
   char wifiCmd[] = "AT+CWJAP=\"Rafi\",\"rafirabi\"\r\n";
   HAL_UART_Transmit(&huart1, (uint8_t*)wifiCmd, strlen(wifiCmd), 5000);
   HAL_Delay(5000); 
   
+  // 6. Initialize the RFID scanner[cite: 1]
   MFRC522_Init();
 
   /* USER CODE END 2 */
@@ -254,15 +283,25 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE(); 
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level for PC13 */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET); 
+
   /*Configure GPIO pin Output Level */
-  // Renamed to match the mfrc522 library expectation
   HAL_GPIO_WritePin(RC522_RST_GPIO_Port, RC522_RST_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(RC522_CS_GPIO_Port, RC522_CS_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOB, RELAY_CTRL_Pin|BUZZER_Pin|LED_ALERT_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 (Built-in LED) */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : TOF_INT_Pin */
   GPIO_InitStruct.Pin = TOF_INT_Pin;
@@ -308,7 +347,7 @@ void ESP8266_Send_User_Post(char* scanned_uid) {
     char httpRequest[512];
     char json_data[128];
     
-    const char *server_ip = "192.168.0.232"; //[cite: 1]
+    const char *server_ip = "192.168.0.232";
     
     sprintf(json_data, "{\"uid\": \"%s\", \"name\": \"Unknown\"}", scanned_uid);
     int json_len = strlen(json_data);

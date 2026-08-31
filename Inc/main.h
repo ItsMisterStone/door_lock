@@ -76,7 +76,10 @@ void Error_Handler(void);
 #define LED_ALERT_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-
+#define RC522_RST_Pin GPIO_PIN_3
+#define RC522_RST_GPIO_Port GPIOA
+#define RC522_CS_Pin GPIO_PIN_4
+#define RC522_CS_GPIO_Port GPIOA
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

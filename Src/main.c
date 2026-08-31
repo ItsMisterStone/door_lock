@@ -23,7 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "mfrc522.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,7 +33,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define MI_OK 0 
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,7 +49,8 @@ SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-
+uint8_t rfid_id[5];
+char uid_string[20];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -59,7 +60,7 @@ static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-void ESP8266_Send_User_Post(void);
+void ESP8266_Send_User_Post(char* scanned_uid);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -101,17 +102,15 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   
-  // 1. Give the ESP8266 a moment to boot up
   HAL_Delay(2000); 
 
-  // 2. Connect to your Wi-Fi network
+  // Connect to Wi-Fi network[cite: 1]
   char wifiCmd[] = "AT+CWJAP=\"Rafi\",\"rafirabi\"\r\n";
   HAL_UART_Transmit(&huart1, (uint8_t*)wifiCmd, strlen(wifiCmd), 5000);
-  HAL_Delay(5000); // Wait for connection to establish
-
-  // 3. Fire the POST request to test backend communication
-  ESP8266_Send_User_Post();
+  HAL_Delay(5000); 
   
+  MFRC522_Init();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -121,6 +120,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    
+    // 1. Detect if a card is present near the scanner (0x26 is standard PICC_REQIDL)
+    if (MFRC522_Request(0x26, rfid_id) == MI_OK) {
+        
+        // 2. Read the actual UID of the card
+        if (MFRC522_Anticoll(rfid_id) == MI_OK) {
+            
+            // 3. Convert bytes to string
+            sprintf(uid_string, "%02X%02X%02X%02X", rfid_id[0], rfid_id[1], rfid_id[2], rfid_id[3]);
+            
+            // 4. Send the POST request to backend[cite: 1]
+            ESP8266_Send_User_Post(uid_string);
+            
+            // 5. Cooldown to prevent spamming
+            HAL_Delay(2000);
+        }
+    }
+    
   }
   /* USER CODE END 3 */
 }
@@ -134,9 +151,6 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -149,8 +163,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -171,14 +183,6 @@ void SystemClock_Config(void)
   */
 static void MX_I2C1_Init(void)
 {
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.ClockSpeed = 400000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
@@ -192,10 +196,6 @@ static void MX_I2C1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
 }
 
 /**
@@ -205,15 +205,6 @@ static void MX_I2C1_Init(void)
   */
 static void MX_SPI1_Init(void)
 {
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
@@ -230,10 +221,6 @@ static void MX_SPI1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
-
 }
 
 /**
@@ -243,14 +230,6 @@ static void MX_SPI1_Init(void)
   */
 static void MX_USART1_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
   huart1.Init.BaudRate = 115200;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -263,10 +242,6 @@ static void MX_USART1_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
 }
 
 /**
@@ -277,9 +252,6 @@ static void MX_USART1_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOD_CLK_ENABLE();
@@ -287,12 +259,9 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(RFID_RST_GPIO_Port, RFID_RST_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(RFID_CS_GPIO_Port, RFID_CS_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin Output Level */
+  // Renamed to match the mfrc522 library expectation
+  HAL_GPIO_WritePin(RC522_RST_GPIO_Port, RC522_RST_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(RC522_CS_GPIO_Port, RC522_CS_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOB, RELAY_CTRL_Pin|BUZZER_Pin|LED_ALERT_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : TOF_INT_Pin */
@@ -301,19 +270,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(TOF_INT_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : RFID_RST_Pin */
-  GPIO_InitStruct.Pin = RFID_RST_Pin;
+  /*Configure GPIO pin : RC522_RST_Pin */
+  GPIO_InitStruct.Pin = RC522_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(RFID_RST_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(RC522_RST_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : RFID_CS_Pin */
-  GPIO_InitStruct.Pin = RFID_CS_Pin;
+  /*Configure GPIO pin : RC522_CS_Pin */
+  GPIO_InitStruct.Pin = RC522_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(RFID_CS_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(RC522_CS_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : VIB_SENSOR_Pin DOOR_SWITCH_Pin */
   GPIO_InitStruct.Pin = VIB_SENSOR_Pin|DOOR_SWITCH_Pin;
@@ -331,23 +300,19 @@ static void MX_GPIO_Init(void)
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-void ESP8266_Send_User_Post(void) {
+void ESP8266_Send_User_Post(char* scanned_uid) {
     char atCommand[256];
     char httpRequest[512];
+    char json_data[128];
     
-    // Configured to point to your local IPv4 address
-    const char *server_ip = "192.168.0.232"; 
-    const char *json_data = "{\"uid\": \"some uid\", \"name\": \"a name\"}";
+    const char *server_ip = "192.168.0.232"; //[cite: 1]
+    
+    sprintf(json_data, "{\"uid\": \"%s\", \"name\": \"Unknown\"}", scanned_uid);
     int json_len = strlen(json_data);
 
-    // 1. Construct the raw HTTP POST request string
     sprintf(httpRequest,
             "POST /api/users HTTP/1.1\r\n"
             "Host: %s:3000\r\n"
@@ -358,19 +323,16 @@ void ESP8266_Send_User_Post(void) {
 
     int http_len = strlen(httpRequest);
 
-    // 2. Open TCP Connection to your backend
     sprintf(atCommand, "AT+CIPSTART=\"TCP\",\"%s\",3000\r\n", server_ip);
     HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
-    HAL_Delay(2000); // Give the ESP-01 time to establish the socket
+    HAL_Delay(2000); 
 
-    // 3. Declare the length of the upcoming HTTP data
     sprintf(atCommand, "AT+CIPSEND=%d\r\n", http_len);
     HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
-    HAL_Delay(500); // Wait for the '>' prompt from the ESP8266
+    HAL_Delay(500); 
 
-    // 4. Send the actual HTTP POST payload
     HAL_UART_Transmit(&huart1, (uint8_t*)httpRequest, http_len, 2000);
-    HAL_Delay(1000); // Wait for server response and connection closure
+    HAL_Delay(1000); 
 }
 /* USER CODE END 4 */
 
@@ -380,27 +342,13 @@ void ESP8266_Send_User_Post(void) {
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
 #ifdef  USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

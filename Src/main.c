@@ -120,6 +120,14 @@ int main(void)
 
   // 3. Standby Loop: Trap the system here until a user is within 50 mm
   while (1) {
+      
+      // Check for vibration tampering while asleep
+      if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Reversed: Turn LED ON
+      } else {
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Reversed: Keep LED OFF
+      }
+
       user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof); 
       
       if (user_distance > 0 && user_distance < 50) {
@@ -131,12 +139,12 @@ int main(void)
   // 4. System Woke Up! Turn PC13 LED "ON" 
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
-  // 5. Connect to Wi-Fi now that the system is awake[cite: 1]
+  // 5. Connect to Wi-Fi now that the system is awake
   char wifiCmd[] = "AT+CWJAP=\"Rafi\",\"rafirabi\"\r\n";
   HAL_UART_Transmit(&huart1, (uint8_t*)wifiCmd, strlen(wifiCmd), 5000);
   HAL_Delay(5000); 
   
-  // 6. Initialize the RFID scanner[cite: 1]
+  // 6. Initialize the RFID scanner
   MFRC522_Init();
 
   /* USER CODE END 2 */
@@ -149,13 +157,21 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     
+    // 1. Check for vibration tampering while awake
+    if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Reversed: Turn LED ON
+    } else {
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Reversed: Keep LED OFF
+    }
+
+    // 2. Detect RFID card
     if (MFRC522_Request(0x26, rfid_id) == MI_OK) {
         
         if (MFRC522_Anticoll(rfid_id) == MI_OK) {
             
             sprintf(uid_string, "%02X%02X%02X%02X", rfid_id[0], rfid_id[1], rfid_id[2], rfid_id[3]);
             
-            // Send the POST request to the /api/logs endpoint with a test status
+            // Send the POST request to the /api/logs endpoint
             ESP8266_Send_Log_Post(uid_string, "granted");
             
             HAL_Delay(2000);
@@ -289,7 +305,10 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(RC522_RST_GPIO_Port, RC522_RST_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(RC522_CS_GPIO_Port, RC522_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOB, RELAY_CTRL_Pin|BUZZER_Pin|LED_ALERT_Pin, GPIO_PIN_RESET);
+  
+  // Set Relay and Buzzer to RESET, but start LED_ALERT_Pin (PB14) as SET (OFF)
+  HAL_GPIO_WritePin(GPIOB, RELAY_CTRL_Pin|BUZZER_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : PC13 (Built-in LED) */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
@@ -338,13 +357,12 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-// Retained original User POST function
 void ESP8266_Send_User_Post(char* scanned_uid) {
     char atCommand[256];
     char httpRequest[512];
     char json_data[128];
     
-    const char *server_ip = "192.168.0.232"; //[cite: 3]
+    const char *server_ip = "192.168.0.232";
     
     sprintf(json_data, "{\"uid\": \"%s\", \"name\": \"Unknown\"}", scanned_uid);
     int json_len = strlen(json_data);
@@ -371,13 +389,12 @@ void ESP8266_Send_User_Post(char* scanned_uid) {
     HAL_Delay(1000); 
 }
 
-// New Log POST function
 void ESP8266_Send_Log_Post(char* scanned_uid, const char* status) {
     char atCommand[256];
     char httpRequest[512];
     char json_data[128];
     
-    const char *server_ip = "192.168.0.232"; //[cite: 3]
+    const char *server_ip = "192.168.0.232"; 
     
     sprintf(json_data, "{\"uid\": \"%s\", \"status\": \"%s\"}", scanned_uid, status);
     int json_len = strlen(json_data);

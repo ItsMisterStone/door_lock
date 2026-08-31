@@ -107,6 +107,10 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   
+  // Force the alert LED off immediately to catch any floating pins during boot
+  HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);
+  
+  // 2-second initial boot delay, allowing the vibration sensor comparator to stabilize
   HAL_Delay(2000); 
 
   // 1. Configure and Initialize the Laser Ranging Sensor
@@ -118,19 +122,19 @@ int main(void)
   // 2. Set system state to "OFF" using PC13
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 
-  // 3. Standby Loop: Trap the system here until a user is within 50 mm
+  // 3. Standby Loop: Trap the system here until a user is within 200 mm
   while (1) {
       
       // Check for vibration tampering while asleep
       if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
-          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Reversed: Turn LED ON
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
       } else {
-          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Reversed: Keep LED OFF
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Keep LED OFF
       }
 
       user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof); 
       
-      if (user_distance > 0 && user_distance < 50) {
+      if (user_distance > 0 && user_distance < 200) {
           break; 
       }
       HAL_Delay(500); 
@@ -146,6 +150,10 @@ int main(void)
   
   // 6. Initialize the RFID scanner
   MFRC522_Init();
+  
+  // 7. Initialize timeout tracking variables for the main loop
+  uint32_t last_activity_time = HAL_GetTick();
+  const uint32_t TIMEOUT_THRESHOLD = 15000; // Updated to 15 seconds
 
   /* USER CODE END 2 */
 
@@ -159,12 +167,18 @@ int main(void)
     
     // 1. Check for vibration tampering while awake
     if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Reversed: Turn LED ON
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
     } else {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Reversed: Keep LED OFF
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Keep LED OFF
     }
 
-    // 2. Detect RFID card
+    // 2. Check ToF Sensor to see if user is still standing there
+    user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof);
+    if (user_distance > 0 && user_distance < 50) {
+        last_activity_time = HAL_GetTick(); // Reset inactivity timer
+    }
+
+    // 3. Detect RFID card
     if (MFRC522_Request(0x26, rfid_id) == MI_OK) {
         
         if (MFRC522_Anticoll(rfid_id) == MI_OK) {
@@ -175,9 +189,17 @@ int main(void)
             ESP8266_Send_Log_Post(uid_string, "granted");
             
             HAL_Delay(2000);
+            
+            last_activity_time = HAL_GetTick(); // Reset inactivity timer after scan
         }
     }
     
+    // 4. Trigger software reset if idle for 15 seconds
+    if ((HAL_GetTick() - last_activity_time) >= TIMEOUT_THRESHOLD) {
+        NVIC_SystemReset(); 
+    }
+    
+    HAL_Delay(100); 
   }
   /* USER CODE END 3 */
 }

@@ -54,7 +54,7 @@ UART_HandleTypeDef huart1;
 uint8_t rfid_id[5];
 char uid_string[20];
 uint16_t user_distance = 9999;
-struct VL53L0X my_tof; // Sensor object required by your library
+struct VL53L0X my_tof; 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -65,6 +65,7 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void ESP8266_Send_User_Post(char* scanned_uid);
+void ESP8266_Send_Log_Post(char* scanned_uid, const char* status);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -110,26 +111,24 @@ int main(void)
 
   // 1. Configure and Initialize the Laser Ranging Sensor
   my_tof.io_2v8 = true;
-  my_tof.address = 0x52; // Standard 0x29 default address shifted left by 1 bit for HAL
+  my_tof.address = 0x52; 
   my_tof.io_timeout = 500;
   VL53L0X_init(&my_tof); 
 
-  // 2. Set system state to "OFF" using PC13 (Blue Pill PC13 is active-low, so SET = OFF)
+  // 2. Set system state to "OFF" using PC13
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 
-  // 3. Standby Loop: Trap the system here until a user is within 800 mm
+  // 3. Standby Loop: Trap the system here until a user is within 50 mm
   while (1) {
-      // Pass the struct pointer to the single-shot read function
       user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof); 
       
-      // If someone is detected closer than 200mm (and reading didn't time out/error), wake up
       if (user_distance > 0 && user_distance < 50) {
           break; 
       }
       HAL_Delay(500); 
   }
 
-  // 4. System Woke Up! Turn PC13 LED "ON" (RESET = ON)
+  // 4. System Woke Up! Turn PC13 LED "ON" 
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
   // 5. Connect to Wi-Fi now that the system is awake[cite: 1]
@@ -150,19 +149,15 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     
-    // 1. Detect if a card is present near the scanner (0x26 is standard PICC_REQIDL)
     if (MFRC522_Request(0x26, rfid_id) == MI_OK) {
         
-        // 2. Read the actual UID of the card
         if (MFRC522_Anticoll(rfid_id) == MI_OK) {
             
-            // 3. Convert bytes to string
             sprintf(uid_string, "%02X%02X%02X%02X", rfid_id[0], rfid_id[1], rfid_id[2], rfid_id[3]);
             
-            // 4. Send the POST request to backend[cite: 1]
-            ESP8266_Send_User_Post(uid_string);
+            // Send the POST request to the /api/logs endpoint with a test status
+            ESP8266_Send_Log_Post(uid_string, "granted");
             
-            // 5. Cooldown to prevent spamming
             HAL_Delay(2000);
         }
     }
@@ -342,18 +337,53 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+// Retained original User POST function
 void ESP8266_Send_User_Post(char* scanned_uid) {
     char atCommand[256];
     char httpRequest[512];
     char json_data[128];
     
-    const char *server_ip = "192.168.0.232";
+    const char *server_ip = "192.168.0.232"; //[cite: 3]
     
     sprintf(json_data, "{\"uid\": \"%s\", \"name\": \"Unknown\"}", scanned_uid);
     int json_len = strlen(json_data);
 
     sprintf(httpRequest,
             "POST /api/users HTTP/1.1\r\n"
+            "Host: %s:3000\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n"
+            "%s", server_ip, json_len, json_data);
+
+    int http_len = strlen(httpRequest);
+
+    sprintf(atCommand, "AT+CIPSTART=\"TCP\",\"%s\",3000\r\n", server_ip);
+    HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
+    HAL_Delay(2000); 
+
+    sprintf(atCommand, "AT+CIPSEND=%d\r\n", http_len);
+    HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
+    HAL_Delay(500); 
+
+    HAL_UART_Transmit(&huart1, (uint8_t*)httpRequest, http_len, 2000);
+    HAL_Delay(1000); 
+}
+
+// New Log POST function
+void ESP8266_Send_Log_Post(char* scanned_uid, const char* status) {
+    char atCommand[256];
+    char httpRequest[512];
+    char json_data[128];
+    
+    const char *server_ip = "192.168.0.232"; //[cite: 3]
+    
+    sprintf(json_data, "{\"uid\": \"%s\", \"status\": \"%s\"}", scanned_uid, status);
+    int json_len = strlen(json_data);
+
+    sprintf(httpRequest,
+            "POST /api/logs HTTP/1.1\r\n"
             "Host: %s:3000\r\n"
             "Content-Type: application/json\r\n"
             "Content-Length: %d\r\n"

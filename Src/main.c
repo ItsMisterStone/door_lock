@@ -121,23 +121,26 @@ int main(void)
 
   // 2. Set system state to "OFF" using PC13
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
-
+  
+  bool tamper_flag = false;
   // 3. Standby Loop: Trap the system here until a user is within 200 mm
   while (1) {
       
       // Check for vibration tampering while asleep
       if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
-          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
-      } else {
-          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Keep LED OFF
+          tamper_flag = true;
       }
 
+      if (tamper_flag) {
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
+      }
       user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof); 
       
       if (user_distance > 0 && user_distance < 200) {
           break; 
       }
-      HAL_Delay(500); 
+
+      HAL_Delay(500);
   }
 
   // 4. System Woke Up! Turn PC13 LED "ON" 
@@ -167,11 +170,12 @@ int main(void)
     
     // 1. Check for vibration tampering while awake
     if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
-    } else {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Keep LED OFF
+        tamper_flag = true;
     }
 
+    if (tamper_flag) {
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
+    }
     // 2. Check ToF Sensor to see if user is still standing there
     user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof);
     if (user_distance > 0 && user_distance < 50) {
@@ -181,6 +185,9 @@ int main(void)
     // 3. Detect RFID card
     if (MFRC522_Request(0x26, rfid_id) == MI_OK) {
         
+        tamper_flag = false;
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET); // Turn LED ON
+
         if (MFRC522_Anticoll(rfid_id) == MI_OK) {
             
             sprintf(uid_string, "%02X%02X%02X%02X", rfid_id[0], rfid_id[1], rfid_id[2], rfid_id[3]);

@@ -25,7 +25,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "mfrc522.h"
-#include "VL53L0X.h" 
+#include "VL53L0X.h"
+#include "ssd1306.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -69,6 +70,11 @@
 #define NAME_BUF_SIZE        32
 #define AUTH_STATUS_BUF_SIZE 16
 /* USER CODE END PD BACKEND */
+
+/* USER CODE BEGIN PD OLED */
+#define OLED_DENY_GRANT_TIME_MS   2000  // how long "Access Granted"/"Denied" shows
+#define OLED_BREAKIN_TIME_MS      3000  // how long "Break In Detected" shows
+/* USER CODE END PD OLED */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -96,6 +102,11 @@ static char http_response[HTTP_RESPONSE_BUF_SIZE];
 // between the standby loop and the main loop since Wi-Fi is now connected
 // before standby begins.
 static bool vib_alert_active = false;
+
+// Tracks whether the system is currently awake (past the ToF wake-up) so the
+// break-in alert knows whether to restore the "Swipe card" home screen or
+// leave the panel blank afterward (still in standby).
+static bool system_awake = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -117,6 +128,13 @@ bool ESP8266_Send_Auth_Post(const char* scanned_uid,
                              char* out_auth_status, uint16_t auth_status_buf_size);
 void ESP8266_Send_Log_Post(const char* scanned_uid, const char* status);
 void ESP8266_Send_Intrusion_Post(const char* sensor);
+
+/* USER CODE BEGIN PFP OLED */
+static void OLED_ShowSwipeHome(void);
+static void OLED_ShowAccessGranted(void);
+static void OLED_ShowAccessDenied(void);
+static void OLED_ShowBreakIn(void);
+/* USER CODE END PFP OLED */
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -174,6 +192,13 @@ int main(void)
   my_tof.io_timeout = 500;
   VL53L0X_init(&my_tof); 
 
+  // 1.5 Initialize the OLED (shares I2C1 with the VL53L0X, different address).
+  // Panel stays blank while the system is in standby - it only lights up
+  // with the "Swipe card" home screen once the ToF sensor wakes the system.
+  SSD1306_Init();
+  SSD1306_Clear();
+  SSD1306_UpdateScreen();
+
   // 2. Set system state to "OFF" using PC13
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 
@@ -199,6 +224,7 @@ int main(void)
           if (!vib_alert_active) {
               vib_alert_active = true;
               ESP8266_Send_Intrusion_Post("vibration");
+              OLED_ShowBreakIn(); // 3s alert, then restores blank standby screen
           }
       } else {
           HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Keep LED OFF
@@ -221,7 +247,11 @@ int main(void)
 
   // 6. Initialize the RFID scanner
   MFRC522_Init();
-  
+
+  // 6.5 System is now awake and waiting for a card - show the home screen.
+  system_awake = true;
+  OLED_ShowSwipeHome();
+
   // 7. Initialize timeout tracking variables for the main loop
   uint32_t last_activity_time = HAL_GetTick();
   const uint32_t TIMEOUT_THRESHOLD = 15000; // 15 seconds
@@ -244,6 +274,7 @@ int main(void)
         if (!vib_alert_active) {
             vib_alert_active = true;
             ESP8266_Send_Intrusion_Post("vibration");
+            OLED_ShowBreakIn(); // 3s alert, then restores "Swipe card" home screen
         }
     } else {
         HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Keep LED OFF
@@ -277,6 +308,8 @@ int main(void)
             ESP8266_Send_Log_Post(uid_string, auth_status);
 
             if (granted) {
+                OLED_ShowAccessGranted(); // 2s feedback
+
                 // Drive motor "open" direction for SERVO_MOVE_TIME_MS, then stop
                 __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_FORWARD);
                 HAL_Delay(SERVO_MOVE_TIME_MS);
@@ -289,7 +322,11 @@ int main(void)
                 __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_REVERSE);
                 HAL_Delay(SERVO_MOVE_TIME_MS);
                 __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP);
+
+                OLED_ShowSwipeHome(); // back to home screen
             } else {
+                OLED_ShowAccessDenied(); // 2s feedback, then restores home screen
+
                 // Unknown or not-yet-approved card: give a short buzzer beep as
                 // "access denied" feedback. Motor stays put - no door movement.
                 HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_SET);
@@ -740,6 +777,59 @@ void ESP8266_Send_Intrusion_Post(const char* sensor)
 
     ESP8266_HTTP_POST("/api/intrusion", json_data, NULL, 0);
 }
+
+/* USER CODE BEGIN 4 OLED */
+
+/**
+  * @brief  Home screen: shown once the ToF sensor has woken the system and
+  *         it's waiting for a card scan.
+  */
+static void OLED_ShowSwipeHome(void)
+{
+    SSD1306_ShowMessage("Swipe card", "to enter");
+}
+
+/**
+  * @brief  2-second "Access Granted" feedback, called right before the
+  *         motor starts moving.
+  */
+static void OLED_ShowAccessGranted(void)
+{
+    SSD1306_ShowMessage("Access", "Granted");
+    HAL_Delay(OLED_DENY_GRANT_TIME_MS);
+    // Caller (main loop) restores the home screen after the door cycle.
+}
+
+/**
+  * @brief  2-second "Access Denied" feedback for an unknown/rejected card,
+  *         then automatically restores the home screen.
+  */
+static void OLED_ShowAccessDenied(void)
+{
+    SSD1306_ShowMessage("Access", "Denied");
+    HAL_Delay(OLED_DENY_GRANT_TIME_MS);
+    OLED_ShowSwipeHome();
+}
+
+/**
+  * @brief  3-second break-in alert, triggered by the vibration sensor in
+  *         either the standby loop or the main loop. Restores whichever
+  *         screen was appropriate afterward: the "Swipe card" home screen
+  *         if the system is awake, or a blank panel if still in standby.
+  */
+static void OLED_ShowBreakIn(void)
+{
+    SSD1306_ShowMessage("Break In", "Detected!");
+    HAL_Delay(OLED_BREAKIN_TIME_MS);
+
+    if (system_awake) {
+        OLED_ShowSwipeHome();
+    } else {
+        SSD1306_Clear();
+        SSD1306_UpdateScreen();
+    }
+}
+/* USER CODE END 4 OLED */
 /* USER CODE END 4 */
 
 /**

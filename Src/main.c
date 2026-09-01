@@ -54,6 +54,21 @@
 #define SERVO_REVERSE        1300  // Pulse width driving it "close" direction
 #define SERVO_MOVE_TIME_MS   2000  // Time spent moving each direction
 #define SERVO_HOLD_TIME_MS   3000  // Time held open before returning
+
+/* USER CODE BEGIN PD BACKEND */
+// Backend server (Node/Express, per API spec)
+#define SERVER_IP            "192.168.0.232"
+#define SERVER_PORT          3000
+
+// Buffer sizes for building requests / holding the raw ESP8266 response
+#define HTTP_REQUEST_BUF_SIZE   512
+#define HTTP_RESPONSE_BUF_SIZE  512
+#define JSON_BODY_BUF_SIZE      160
+#define AT_CMD_BUF_SIZE         128
+
+#define NAME_BUF_SIZE        32
+#define AUTH_STATUS_BUF_SIZE 16
+/* USER CODE END PD BACKEND */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -72,6 +87,13 @@ uint8_t rfid_id[5];
 char uid_string[20];
 uint16_t user_distance = 9999;
 struct VL53L0X my_tof; 
+
+// Scratch buffer reused for every HTTP response read back from the ESP8266
+static char http_response[HTTP_RESPONSE_BUF_SIZE];
+
+// Edge-detect state so we only fire one /api/intrusion POST per tamper event,
+// not once every 100ms while the vibration sensor stays HIGH.
+static bool vib_alert_active = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -82,8 +104,17 @@ static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
-void ESP8266_Send_User_Post(char* scanned_uid);
-void ESP8266_Send_Log_Post(char* scanned_uid, const char* status);
+static bool ESP8266_HTTP_POST(const char* path, const char* json_data,
+                               char* response_buf, uint16_t response_buf_size);
+static bool JSON_ExtractBool(const char* json, const char* key, bool* out_value);
+static bool JSON_ExtractString(const char* json, const char* key,
+                                char* out_buf, uint16_t out_buf_size);
+
+bool ESP8266_Send_Auth_Post(const char* scanned_uid,
+                             char* out_name, uint16_t name_buf_size,
+                             char* out_auth_status, uint16_t auth_status_buf_size);
+void ESP8266_Send_Log_Post(const char* scanned_uid, const char* status);
+void ESP8266_Send_Intrusion_Post(const char* sensor);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -148,6 +179,9 @@ int main(void)
   while (1) {
       
       // Check for vibration tampering while asleep (Trigger on SET/HIGH)
+      // NOTE: Wi-Fi isn't connected yet at this point (that happens in step 5,
+      // after wake-up), so a tamper hit here can only drive the LED - it can't
+      // be POSTed to /api/intrusion until the system is awake.
       if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_SET) {
           HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Turn LED ON
       } else {
@@ -187,11 +221,18 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     
-    // 1. Check for vibration tampering while awake (Trigger on SET/HIGH)
+    // 1. Check for vibration tampering while awake (Trigger on SET/HIGH).
+    // Edge-triggered: fire /api/intrusion once per tamper event, not on every
+    // 100ms pass through the loop while the sensor stays HIGH.
     if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_SET) {
         HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Turn LED ON
+        if (!vib_alert_active) {
+            vib_alert_active = true;
+            ESP8266_Send_Intrusion_Post("vibration");
+        }
     } else {
         HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Keep LED OFF
+        vib_alert_active = false;
     }
 
     // 2. Check ToF Sensor to see if user is still standing there
@@ -206,24 +247,42 @@ int main(void)
         if (MFRC522_Anticoll(rfid_id) == MI_OK) {
             
             sprintf(uid_string, "%02X%02X%02X%02X", rfid_id[0], rfid_id[1], rfid_id[2], rfid_id[3]);
-            
-            // Send the POST request to the /api/logs endpoint
-            ESP8266_Send_Log_Post(uid_string, "granted");
-            
-            // Drive motor "open" direction for SERVO_MOVE_TIME_MS, then stop
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_FORWARD);
-            HAL_Delay(SERVO_MOVE_TIME_MS);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP);
 
-            // Hold open for SERVO_HOLD_TIME_MS (motor stays stopped, not spinning)
-            HAL_Delay(SERVO_HOLD_TIME_MS);
+            // Ask the backend whether this card is known. Unknown cards get
+            // queued server-side into pending_auth.json; we don't need a
+            // separate "register user" call for that anymore.
+            char user_name[NAME_BUF_SIZE];
+            char auth_status[AUTH_STATUS_BUF_SIZE];
+            bool granted = ESP8266_Send_Auth_Post(uid_string,
+                                                   user_name, sizeof(user_name),
+                                                   auth_status, sizeof(auth_status));
 
-            // Drive motor "close" direction for SERVO_MOVE_TIME_MS, then stop
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_REVERSE);
-            HAL_Delay(SERVO_MOVE_TIME_MS);
-            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP);
-            
-            last_activity_time = HAL_GetTick(); // Reset inactivity timer after full scan & open cycle
+            // Log every scan attempt (granted or denied) with the status the
+            // backend returned.
+            ESP8266_Send_Log_Post(uid_string, auth_status);
+
+            if (granted) {
+                // Drive motor "open" direction for SERVO_MOVE_TIME_MS, then stop
+                __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_FORWARD);
+                HAL_Delay(SERVO_MOVE_TIME_MS);
+                __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP);
+
+                // Hold open for SERVO_HOLD_TIME_MS (motor stays stopped, not spinning)
+                HAL_Delay(SERVO_HOLD_TIME_MS);
+
+                // Drive motor "close" direction for SERVO_MOVE_TIME_MS, then stop
+                __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_REVERSE);
+                HAL_Delay(SERVO_MOVE_TIME_MS);
+                __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP);
+            } else {
+                // Unknown or not-yet-approved card: give a short buzzer beep as
+                // "access denied" feedback. Motor stays put - no door movement.
+                HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_SET);
+                HAL_Delay(300);
+                HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_RESET);
+            }
+
+            last_activity_time = HAL_GetTick(); // Reset inactivity timer after scan
         }
     }
     
@@ -470,68 +529,201 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-void ESP8266_Send_User_Post(char* scanned_uid) {
-    char atCommand[256];
-    char httpRequest[512];
-    char json_data[128];
-    
-    const char *server_ip = "192.168.0.232";
-    
-    sprintf(json_data, "{\"uid\": \"%s\", \"name\": \"Unknown\"}", scanned_uid);
+/**
+  * @brief  Low-level helper: opens a TCP connection to the backend, sends a
+  *         POST request with a JSON body to the given path, and optionally
+  *         reads back whatever the ESP8266 returns (AT response + HTTP
+  *         response) into response_buf.
+  *
+  *         NOTE: this mirrors the AT-command style already used in the
+  *         original code (fire the AT commands, then HAL_Delay) rather than
+  *         parsing "OK"/"SEND OK"/"+IPD" framing byte-by-byte. For a
+  *         production build, switching to HAL_UART_Receive_IT / DMA with
+  *         idle-line detection would make response capture far more robust.
+  *
+  * @param  path            API path, e.g. "/api/auth"
+  * @param  json_data       Already-built JSON request body
+  * @param  response_buf    Buffer to receive the raw response (may be NULL
+  *                          if the caller doesn't need to read a response,
+  *                          e.g. for fire-and-forget log/intrusion posts)
+  * @param  response_buf_size Size of response_buf
+  * @retval true if the request was transmitted (does not guarantee a 2xx
+  *          reply was received - the caller should treat a missing/garbled
+  *          response as "not granted" / "unknown" rather than crash)
+  */
+static bool ESP8266_HTTP_POST(const char* path, const char* json_data,
+                               char* response_buf, uint16_t response_buf_size)
+{
+    char atCommand[AT_CMD_BUF_SIZE];
+    char httpRequest[HTTP_REQUEST_BUF_SIZE];
+
     int json_len = strlen(json_data);
 
-    sprintf(httpRequest,
-            "POST /api/users HTTP/1.1\r\n"
-            "Host: %s:3000\r\n"
-            "Content-Type: application/json\r\n"
-            "Content-Length: %d\r\n"
-            "Connection: close\r\n\r\n"
-            "%s", server_ip, json_len, json_data);
+    snprintf(httpRequest, sizeof(httpRequest),
+             "POST %s HTTP/1.1\r\n"
+             "Host: %s:%d\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %d\r\n"
+             "Connection: close\r\n\r\n"
+             "%s", path, SERVER_IP, SERVER_PORT, json_len, json_data);
 
     int http_len = strlen(httpRequest);
 
-    sprintf(atCommand, "AT+CIPSTART=\"TCP\",\"%s\",3000\r\n", server_ip);
+    snprintf(atCommand, sizeof(atCommand), "AT+CIPSTART=\"TCP\",\"%s\",%d\r\n",
+             SERVER_IP, SERVER_PORT);
     HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
-    HAL_Delay(2000); 
+    HAL_Delay(1000);
 
-    sprintf(atCommand, "AT+CIPSEND=%d\r\n", http_len);
+    snprintf(atCommand, sizeof(atCommand), "AT+CIPSEND=%d\r\n", http_len);
     HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
-    HAL_Delay(500); 
+    HAL_Delay(200);
 
     HAL_UART_Transmit(&huart1, (uint8_t*)httpRequest, http_len, 2000);
-    HAL_Delay(1000); 
+
+    if (response_buf != NULL && response_buf_size > 0) {
+        memset(response_buf, 0, response_buf_size);
+        // Blocking read of whatever comes back (module echo + "+IPD,n:" +
+        // HTTP headers + JSON body). We ignore the HAL_TIMEOUT return - on
+        // timeout, response_buf still holds however many bytes arrived, which
+        // is normally enough to contain the JSON body we care about.
+        HAL_UART_Receive(&huart1, (uint8_t*)response_buf, response_buf_size - 1, 3000);
+    } else {
+        // Fire-and-forget call (logs/intrusion): still give the module time
+        // to finish sending before we move on, matching original behavior.
+        HAL_Delay(1000);
+    }
+
+    return true;
 }
 
-void ESP8266_Send_Log_Post(char* scanned_uid, const char* status) {
-    char atCommand[256];
-    char httpRequest[512];
-    char json_data[128];
-    
-    const char *server_ip = "192.168.0.232"; 
-    
-    sprintf(json_data, "{\"uid\": \"%s\", \"status\": \"%s\"}", scanned_uid, status);
-    int json_len = strlen(json_data);
+/**
+  * @brief  Extract a JSON boolean value ("key": true / "key": false) from a
+  *         flat (non-nested) JSON object using plain string search. Good
+  *         enough for the small, fixed-shape responses this backend returns;
+  *         not a general-purpose JSON parser.
+  */
+static bool JSON_ExtractBool(const char* json, const char* key, bool* out_value)
+{
+    char search_key[32];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
 
-    sprintf(httpRequest,
-            "POST /api/logs HTTP/1.1\r\n"
-            "Host: %s:3000\r\n"
-            "Content-Type: application/json\r\n"
-            "Content-Length: %d\r\n"
-            "Connection: close\r\n\r\n"
-            "%s", server_ip, json_len, json_data);
+    char* pos = strstr(json, search_key);
+    if (pos == NULL) return false;
 
-    int http_len = strlen(httpRequest);
+    pos = strchr(pos + strlen(search_key), ':');
+    if (pos == NULL) return false;
+    pos++;
+    while (*pos == ' ') pos++;
 
-    sprintf(atCommand, "AT+CIPSTART=\"TCP\",\"%s\",3000\r\n", server_ip);
-    HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
-    HAL_Delay(2000); 
+    if (strncmp(pos, "true", 4) == 0)  { *out_value = true;  return true; }
+    if (strncmp(pos, "false", 5) == 0) { *out_value = false; return true; }
+    return false;
+}
 
-    sprintf(atCommand, "AT+CIPSEND=%d\r\n", http_len);
-    HAL_UART_Transmit(&huart1, (uint8_t*)atCommand, strlen(atCommand), 1000);
-    HAL_Delay(500); 
+/**
+  * @brief  Extract a JSON string value ("key": "value") from a flat JSON
+  *         object using plain string search. See note on JSON_ExtractBool.
+  */
+static bool JSON_ExtractString(const char* json, const char* key,
+                                char* out_buf, uint16_t out_buf_size)
+{
+    char search_key[32];
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
 
-    HAL_UART_Transmit(&huart1, (uint8_t*)httpRequest, http_len, 2000);
-    HAL_Delay(1000); 
+    char* pos = strstr(json, search_key);
+    if (pos == NULL) return false;
+
+    pos = strchr(pos + strlen(search_key), ':');
+    if (pos == NULL) return false;
+    pos++;
+    while (*pos == ' ') pos++;
+
+    if (*pos != '"') return false; // value isn't a string (e.g. null)
+    pos++;
+
+    char* end = strchr(pos, '"');
+    if (end == NULL) return false;
+
+    uint16_t len = (uint16_t)(end - pos);
+    if (len >= out_buf_size) len = out_buf_size - 1;
+    memcpy(out_buf, pos, len);
+    out_buf[len] = '\0';
+    return true;
+}
+
+/**
+  * @brief  POST /api/auth - ask the backend whether a scanned card is known.
+  *         Response shape: { granted, name, auth_status }.
+  *         An unknown uid gets queued into pending_auth.json server-side and
+  *         comes back with auth_status "denied" - no separate "register
+  *         user" call is needed.
+  *
+  * @param  scanned_uid        Hex UID string, e.g. "A1B2C3D4"
+  * @param  out_name           Filled with "name" from the response, or
+  *                              "Unknown" if the field is missing/parse fails
+  * @param  name_buf_size      Size of out_name
+  * @param  out_auth_status    Filled with "auth_status" from the response, or
+  *                              a fallback derived from "granted" if parsing
+  *                              fails
+  * @param  auth_status_buf_size Size of out_auth_status
+  * @retval true if the backend granted access, false otherwise (denied,
+  *          pending, or the response couldn't be parsed - fails closed)
+  */
+bool ESP8266_Send_Auth_Post(const char* scanned_uid,
+                             char* out_name, uint16_t name_buf_size,
+                             char* out_auth_status, uint16_t auth_status_buf_size)
+{
+    char json_data[JSON_BODY_BUF_SIZE];
+    snprintf(json_data, sizeof(json_data), "{\"uid\": \"%s\"}", scanned_uid);
+
+    ESP8266_HTTP_POST("/api/auth", json_data, http_response, sizeof(http_response));
+
+    bool granted = false;
+    JSON_ExtractBool(http_response, "granted", &granted); // stays false (fail closed) if not found
+
+    if (out_name != NULL && name_buf_size > 0) {
+        if (!JSON_ExtractString(http_response, "name", out_name, name_buf_size)) {
+            strncpy(out_name, "Unknown", name_buf_size - 1);
+            out_name[name_buf_size - 1] = '\0';
+        }
+    }
+
+    if (out_auth_status != NULL && auth_status_buf_size > 0) {
+        if (!JSON_ExtractString(http_response, "auth_status", out_auth_status, auth_status_buf_size)) {
+            const char* fallback = granted ? "granted" : "denied";
+            strncpy(out_auth_status, fallback, auth_status_buf_size - 1);
+            out_auth_status[auth_status_buf_size - 1] = '\0';
+        }
+    }
+
+    return granted;
+}
+
+/**
+  * @brief  POST /api/logs - create an access log entry for a scan attempt.
+  * @param  scanned_uid  Hex UID string
+  * @param  status       Status to log (e.g. the auth_status returned by
+  *                        ESP8266_Send_Auth_Post: "granted" / "denied")
+  */
+void ESP8266_Send_Log_Post(const char* scanned_uid, const char* status)
+{
+    char json_data[JSON_BODY_BUF_SIZE];
+    snprintf(json_data, sizeof(json_data), "{\"uid\": \"%s\", \"status\": \"%s\"}",
+             scanned_uid, status);
+
+    ESP8266_HTTP_POST("/api/logs", json_data, NULL, 0);
+}
+
+/**
+  * @brief  POST /api/intrusion - log a break-in / tamper event.
+  * @param  sensor  Which sensor tripped, e.g. "vibration"
+  */
+void ESP8266_Send_Intrusion_Post(const char* sensor)
+{
+    char json_data[JSON_BODY_BUF_SIZE];
+    snprintf(json_data, sizeof(json_data), "{\"sensor\": \"%s\"}", sensor);
+
+    ESP8266_HTTP_POST("/api/intrusion", json_data, NULL, 0);
 }
 /* USER CODE END 4 */
 

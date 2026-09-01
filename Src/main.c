@@ -36,6 +36,24 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define MI_OK 0 
+
+/*
+ * SERVO NOTE:
+ * This motor behaves as a CONTINUOUS-ROTATION servo, not a standard positional
+ * SG90. For this type: ~1500us = stopped, <1500us = spin one direction,
+ * >1500us = spin the other direction. The further from 1500, the faster it spins.
+ *
+ * SERVO_FORWARD / SERVO_REVERSE below are starting guesses. If the motor doesn't
+ * turn roughly 90 degrees in SERVO_MOVE_TIME_MS, nudge these values closer to or
+ * further from 1500 (closer = slower turn, further = faster turn) until the
+ * physical rotation matches ~90 degrees in 2 seconds. Do not change
+ * SERVO_MOVE_TIME_MS to compensate; tune the pulse widths instead.
+ */
+#define SERVO_STOP           1500  // Pulse width that holds the motor still
+#define SERVO_FORWARD        1700  // Pulse width driving it "open" direction
+#define SERVO_REVERSE        1300  // Pulse width driving it "close" direction
+#define SERVO_MOVE_TIME_MS   2000  // Time spent moving each direction
+#define SERVO_HOLD_TIME_MS   3000  // Time held open before returning
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -45,10 +63,9 @@
 
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
-
 SPI_HandleTypeDef hspi1;
-
 UART_HandleTypeDef huart1;
+TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
 uint8_t rfid_id[5];
@@ -63,6 +80,7 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 void ESP8266_Send_User_Post(char* scanned_uid);
 void ESP8266_Send_Log_Post(char* scanned_uid, const char* status);
@@ -79,7 +97,6 @@ void ESP8266_Send_Log_Post(char* scanned_uid, const char* status);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -105,6 +122,7 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   
   // Force the alert LED OFF immediately (Active-HIGH means RESET = OFF)
@@ -112,6 +130,10 @@ int main(void)
   
   // 2-second initial boot delay, allowing the vibration sensor comparator to stabilize
   HAL_Delay(2000); 
+
+  // Start the PWM signal for the continuous-rotation motor on PA1 (TIM2_CH2)
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP); // Motor stopped at boot
 
   // 1. Configure and Initialize the Laser Ranging Sensor
   my_tof.io_2v8 = true;
@@ -188,9 +210,20 @@ int main(void)
             // Send the POST request to the /api/logs endpoint
             ESP8266_Send_Log_Post(uid_string, "granted");
             
-            HAL_Delay(2000);
+            // Drive motor "open" direction for SERVO_MOVE_TIME_MS, then stop
+            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_FORWARD);
+            HAL_Delay(SERVO_MOVE_TIME_MS);
+            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP);
+
+            // Hold open for SERVO_HOLD_TIME_MS (motor stays stopped, not spinning)
+            HAL_Delay(SERVO_HOLD_TIME_MS);
+
+            // Drive motor "close" direction for SERVO_MOVE_TIME_MS, then stop
+            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_REVERSE);
+            HAL_Delay(SERVO_MOVE_TIME_MS);
+            __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, SERVO_STOP);
             
-            last_activity_time = HAL_GetTick(); // Reset inactivity timer after scan
+            last_activity_time = HAL_GetTick(); // Reset inactivity timer after full scan & open cycle
         }
     }
     
@@ -236,6 +269,65 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  // Enable TIM2 Clock
+  __HAL_RCC_TIM2_CLK_ENABLE();
+
+  htim2.Instance = TIM2;
+  // Prescaler = 72-1 -> Timer clock is 1MHz
+  htim2.Init.Prescaler = 71;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  // Period = 20000-1 -> 20ms period (50Hz) for standard servo
+  htim2.Init.Period = 19999;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  // Configure PA1 as Alternate Function Push-Pull for TIM2_CH2
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 /**
@@ -361,7 +453,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pins : VIB_SENSOR_Pin DOOR_SWITCH_Pin */
   GPIO_InitStruct.Pin = VIB_SENSOR_Pin|DOOR_SWITCH_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : RELAY_CTRL_Pin BUZZER_Pin LED_ALERT_Pin */

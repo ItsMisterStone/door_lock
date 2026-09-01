@@ -107,8 +107,8 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   
-  // Force the alert LED off immediately to catch any floating pins during boot
-  HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);
+  // Force the alert LED OFF immediately (Active-HIGH means RESET = OFF)
+  HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET);
   
   // 2-second initial boot delay, allowing the vibration sensor comparator to stabilize
   HAL_Delay(2000); 
@@ -125,11 +125,11 @@ int main(void)
   // 3. Standby Loop: Trap the system here until a user is within 200 mm
   while (1) {
       
-      // Check for vibration tampering while asleep
-      if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
-          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
+      // Check for vibration tampering while asleep (Trigger on SET/HIGH)
+      if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_SET) {
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Turn LED ON
       } else {
-          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Keep LED OFF
+          HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Keep LED OFF
       }
 
       user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof); 
@@ -153,7 +153,7 @@ int main(void)
   
   // 7. Initialize timeout tracking variables for the main loop
   uint32_t last_activity_time = HAL_GetTick();
-  const uint32_t TIMEOUT_THRESHOLD = 15000; // Updated to 15 seconds
+  const uint32_t TIMEOUT_THRESHOLD = 15000; // 15 seconds
 
   /* USER CODE END 2 */
 
@@ -165,11 +165,11 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     
-    // 1. Check for vibration tampering while awake
-    if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_RESET) {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Turn LED ON
+    // 1. Check for vibration tampering while awake (Trigger on SET/HIGH)
+    if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_SET) {
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Turn LED ON
     } else {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Keep LED OFF
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Keep LED OFF
     }
 
     // 2. Check ToF Sensor to see if user is still standing there
@@ -328,9 +328,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(RC522_RST_GPIO_Port, RC522_RST_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(RC522_CS_GPIO_Port, RC522_CS_Pin, GPIO_PIN_SET);
   
-  // Set Relay and Buzzer to RESET, but start LED_ALERT_Pin (PB14) as SET (OFF)
-  HAL_GPIO_WritePin(GPIOB, RELAY_CTRL_Pin|BUZZER_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);
+  // Set Relay, Buzzer, and LED_ALERT_Pin to boot LOW (RESET) to keep them OFF
+  HAL_GPIO_WritePin(GPIOB, RELAY_CTRL_Pin|BUZZER_Pin|LED_ALERT_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PC13 (Built-in LED) */
   GPIO_InitStruct.Pin = GPIO_PIN_13;

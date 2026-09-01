@@ -92,7 +92,9 @@ struct VL53L0X my_tof;
 static char http_response[HTTP_RESPONSE_BUF_SIZE];
 
 // Edge-detect state so we only fire one /api/intrusion POST per tamper event,
-// not once every 100ms while the vibration sensor stays HIGH.
+// not once every loop pass while the vibration sensor stays HIGH. Shared
+// between the standby loop and the main loop since Wi-Fi is now connected
+// before standby begins.
 static bool vib_alert_active = false;
 /* USER CODE END PV */
 
@@ -175,17 +177,32 @@ int main(void)
   // 2. Set system state to "OFF" using PC13
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 
-  // 3. Standby Loop: Trap the system here until a user is within 200 mm
+  // 2.5 Connect to Wi-Fi BEFORE entering standby. The module now stays
+  // associated the whole time the system is "off", so intrusion events
+  // (vibration/tamper) detected while idle can still be POSTed to the
+  // backend instead of only driving the LED.
+  char wifiCmd[] = "AT+CWJAP=\"Rafi\",\"rafirabi\"\r\n";
+  HAL_UART_Transmit(&huart1, (uint8_t*)wifiCmd, strlen(wifiCmd), 5000);
+  HAL_Delay(5000);
+
+  // 3. Standby Loop: Trap the system here until a user is within 200 mm.
+  // RFID stays uninitialized/off during this whole loop - only the ToF
+  // sensor and vibration sensor are active, plus Wi-Fi (connected above).
   while (1) {
       
-      // Check for vibration tampering while asleep (Trigger on SET/HIGH)
-      // NOTE: Wi-Fi isn't connected yet at this point (that happens in step 5,
-      // after wake-up), so a tamper hit here can only drive the LED - it can't
-      // be POSTed to /api/intrusion until the system is awake.
+      // Check for vibration tampering while asleep (Trigger on SET/HIGH).
+      // Edge-triggered, same pattern as the main loop below: fire exactly
+      // one /api/intrusion POST per tamper event, not on every 500ms pass
+      // through the loop while the sensor stays HIGH.
       if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_SET) {
           HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Turn LED ON
+          if (!vib_alert_active) {
+              vib_alert_active = true;
+              ESP8266_Send_Intrusion_Post("vibration");
+          }
       } else {
           HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Keep LED OFF
+          vib_alert_active = false;
       }
 
       user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof); 
@@ -199,11 +216,9 @@ int main(void)
   // 4. System Woke Up! Turn PC13 LED "ON" 
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
-  // 5. Connect to Wi-Fi now that the system is awake
-  char wifiCmd[] = "AT+CWJAP=\"Rafi\",\"rafirabi\"\r\n";
-  HAL_UART_Transmit(&huart1, (uint8_t*)wifiCmd, strlen(wifiCmd), 5000);
-  HAL_Delay(5000); 
-  
+  // 5. Wi-Fi is already connected (see step 2.5, before standby) - no need
+  // to reconnect here.
+
   // 6. Initialize the RFID scanner
   MFRC522_Init();
   

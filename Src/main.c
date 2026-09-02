@@ -51,8 +51,8 @@
  * SERVO_MOVE_TIME_MS to compensate; tune the pulse widths instead.
  */
 #define SERVO_STOP           1500  // Pulse width that holds the motor still
-#define SERVO_FORWARD        1550  // Pulse width driving it "open" direction
-#define SERVO_REVERSE        1450  // Pulse width driving it "close" direction
+#define SERVO_FORWARD        1555  // Pulse width driving it "open" direction
+#define SERVO_REVERSE        1445  // Pulse width driving it "close" direction
 #define SERVO_MOVE_TIME_MS   500  // Time spent moving each direction
 #define SERVO_HOLD_TIME_MS   3000  // Time held open before returning
 

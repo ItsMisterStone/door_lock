@@ -51,14 +51,14 @@
  * SERVO_MOVE_TIME_MS to compensate; tune the pulse widths instead.
  */
 #define SERVO_STOP           1500  // Pulse width that holds the motor still
-#define SERVO_FORWARD        1555  // Pulse width driving it "open" direction
-#define SERVO_REVERSE        1445  // Pulse width driving it "close" direction
-#define SERVO_MOVE_TIME_MS   500  // Time spent moving each direction
+#define SERVO_FORWARD        1600  // Pulse width driving it "open" direction
+#define SERVO_REVERSE        1400  // Pulse width driving it "close" direction
+#define SERVO_MOVE_TIME_MS   750  // Time spent moving each direction
 #define SERVO_HOLD_TIME_MS   3000  // Time held open before returning
 
 /* USER CODE BEGIN PD BACKEND */
 // Backend server (Node/Express, per API spec)
-#define SERVER_IP            "192.168.0.232"
+#define SERVER_IP            "192.168.207.70"
 #define SERVER_PORT          3000
 
 // Buffer sizes for building requests / holding the raw ESP8266 response
@@ -206,7 +206,7 @@ int main(void)
   // associated the whole time the system is "off", so intrusion events
   // (vibration/tamper) detected while idle can still be POSTed to the
   // backend instead of only driving the LED.
-  char wifiCmd[] = "AT+CWJAP=\"Rafi\",\"rafirabi\"\r\n";
+  char wifiCmd[] = "AT+CWJAP=\"PROTIK\",\"12341234\"\r\n";
   HAL_UART_Transmit(&huart1, (uint8_t*)wifiCmd, strlen(wifiCmd), 5000);
   HAL_Delay(5000);
 
@@ -242,9 +242,6 @@ int main(void)
   // 4. System Woke Up! Turn PC13 LED "ON" 
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
-  // 5. Wi-Fi is already connected (see step 2.5, before standby) - no need
-  // to reconnect here.
-
   // 6. Initialize the RFID scanner
   MFRC522_Init();
 
@@ -270,20 +267,22 @@ int main(void)
     // Edge-triggered: fire /api/intrusion once per tamper event, not on every
     // 100ms pass through the loop while the sensor stays HIGH.
     if (HAL_GPIO_ReadPin(GPIOB, VIB_SENSOR_Pin) == GPIO_PIN_SET) {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);   // Turn LED ON
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);  // Turn LED ON
+				HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_SET);			// Turn Buzzer ON
         if (!vib_alert_active) {
             vib_alert_active = true;
             ESP8266_Send_Intrusion_Post("vibration");
             OLED_ShowBreakIn(); // 3s alert, then restores "Swipe card" home screen
         }
     } else {
-        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET); // Keep LED OFF
+        HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET);  //Keep LED Off
+				HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_RESET);     // Keep Buzzer OFF
         vib_alert_active = false;
     }
 
     // 2. Check ToF Sensor to see if user is still standing there
     user_distance = VL53L0X_readRangeSingleMillimeters(&my_tof);
-    if (user_distance > 0 && user_distance < 50) {
+    if (user_distance > 0 && user_distance < 200) {
         last_activity_time = HAL_GetTick(); // Reset inactivity timer
     }
 
@@ -329,9 +328,9 @@ int main(void)
 
                 // Unknown or not-yet-approved card: give a short buzzer beep as
                 // "access denied" feedback. Motor stays put - no door movement.
-                HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_SET);
+                HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_SET);
                 HAL_Delay(300);
-                HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_RESET);
+                HAL_GPIO_WritePin(GPIOB, LED_ALERT_Pin, GPIO_PIN_RESET);
             }
 
             last_activity_time = HAL_GetTick(); // Reset inactivity timer after scan
